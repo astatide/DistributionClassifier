@@ -60,23 +60,28 @@ class CustomPoissonDataset(Dataset):
             return self.generate_distribution()[idx], 1
         
 class MixedNormalPoissonDataset(Dataset):
-    def __init__(self, mean=0.0, stdev=1.0, lam=5, size=10000, sample_size = 10, save_dist=True):
+    def __init__(self, mean=4.0, stdev=1.0, lam=5, size=10000, sample_size = 10, save_dist=True, noisy_poisson=True):
         self.mean = mean
         self.stdev = stdev
         self.lam = lam
         self.size = size
         self.save_dist = save_dist
         self.sample_size = sample_size
+        self.noisy_poisson = noisy_poisson
         if (save_dist):
             self.dist = []
             self.dist.append(self.generate_normal_distribution())
             self.dist.append(self.generate_poisson_distribution())
 
     def generate_poisson_distribution(self):
-        return np.random.default_rng().poisson(
+        if self.noisy_poisson:
+            noise = np.random.normal(0,1,self.size);
+        else:
+            noise = 0
+        return (noise + np.random.default_rng().poisson(
             lam=self.lam,
             size=self.size,
-        ).astype(np.float32)
+        )).astype(np.float32)
         
     def generate_normal_distribution(self):
         return np.random.default_rng().normal(
@@ -85,19 +90,30 @@ class MixedNormalPoissonDataset(Dataset):
             size=self.size,       # The size or shape of your array
         ).astype(np.float32)
     
-    def return_random_indices(self, mean):
+    def return_random_indices(self, idx):
         # this is DEFINITELY super inefficient but hey.
         # pdist_size = self.size/100 if self.size % 100 == 0 else 1
-        p = np.random.default_rng().normal(
-            loc=mean,        # The mean of the distribution
-            scale=self.stdev,      # The standard deviation 
-            size=self.size       # The size or shape of your array
-            )
-        p /= p.sum()
-        return np.random.choice(self.size, self.sample_size, replace=False, p=p)
+        # We're sorta bullshitting it, but we just want to make sure we generate numbers within our range.
+        # So we take 200 random values from a distribution then add the current index to it to ensure we're sampling from a gaussian around that point
+        # If we're too far past the index, we ... well, we'll need to do something, but for now we just REALLY bullshit it.
+        size = 200
+        if (idx + size >= self.size):
+            size = self.size-idx
+        # p = np.random.default_rng().normal(
+        #     loc=mean,        # The mean of the distribution
+        #     scale=self.stdev,      # The standard deviation 
+        #     size=self.size       # The size or shape of your array
+        #     )
+        # psum = p.sum()
+        # # p /= np.linalg.norm(p)
+        # p /= psum
+        # return np.random.choice(self.size, self.sample_size, replace=True, p=p)
+        # Pull a bunch of random numbers, add the mean to each to recenter around that point.
+        # print(size, idx, self.size)
+        return np.random.choice(size, self.sample_size, replace=True)+idx
     
     def __len__(self):
-        return self.size*self.sample_size # this is the size of any distribution you're sampling from, NOT the total number of distributions*size!
+        return self.size # this is the size of any distribution you're sampling from, NOT the total number of distributions*size!
 
     def __getitem__(self, idx):
         distIndex = random.getrandbits(1)
@@ -111,8 +127,8 @@ class MixedNormalPoissonDataset(Dataset):
                 return self.generate_poisson_distribution()[index], distIndex
             
 
-train_dataloader = DataLoader(MixedNormalPoissonDataset(size=1048576), batch_size=64, shuffle=True)
-test_dataloader = DataLoader(MixedNormalPoissonDataset(size=1048576), batch_size=64, shuffle=True)
+train_dataloader = DataLoader(MixedNormalPoissonDataset(size=1048576), batch_size=64, shuffle=False)
+test_dataloader = DataLoader(MixedNormalPoissonDataset(size=1024), batch_size=64, shuffle=False)
 
 # this gets our features and labels
 train_features, train_labels = next(iter(train_dataloader))
@@ -147,17 +163,11 @@ class NeuralNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 10),
             nn.ReLU(),
-            nn.Linear(10, 1)
+            nn.Linear(10, 10)
         )
-        # self.linear_relu_stack = nn.Sequential(
-        #     nn.Linear(28*28, 512),
-        #     nn.ReLU(),
-        #     nn.Linear(512, 512),
-        #     nn.ReLU(),
-        #     nn.Linear(512, 10)
-        # )
 
     def forward(self, x):
+        # print("FORWARD", x.shape)
         x = self.flatten(x)
         logits = self.linear_relu_stack(x)
         return logits
@@ -209,3 +219,42 @@ for t in range(epochs):
     train(train_dataloader, model, loss_fn, optimizer)
     test(test_dataloader, model, loss_fn)
 print("Done!")
+
+# Now to evaluate and see for ourselves!
+model.eval()
+evalSet = MixedNormalPoissonDataset(size=40960)
+evalItems = np.zeros((80, 10)).astype(np.float32)
+# evalItems = []
+# shove into an array!
+evalLabels = []
+for i in range(0, 80):
+    ei = evalSet[1000+i]
+    evalItems[i, :] = ei[0]
+    evalLabels.append(ei[1])
+
+# print("EVALUATION SET: ", evalItems[0][0], evalItems[0][1])
+# actual = evalItems[0][1]
+
+# Turn it into a tensor, then shove it into the device.
+# Otherwise it'll bitch all fucking day.
+evalItems = torch.tensor(evalItems)
+evalItems = evalItems.to(device)
+
+
+# print(evalItems.shape)
+
+correctness = 0
+
+with torch.no_grad():
+    pred = model(evalItems)
+    predicted = pred[0].argmax(0)
+    actual = evalLabels[0]
+    for i in range(0, 80):
+        predicted = pred[i].argmax(0)
+        actual = evalLabels[i]
+        print(f'Predicted: "{predicted}", Actual: "{actual}", DISTRIBUTION: "{evalItems[i, :]}"')
+        # print("DISTRIBUTION: ", evalItems[i, :])
+        if (predicted == actual):
+            correctness += 1
+
+print(f'FINAL SCORE: {correctness}')
